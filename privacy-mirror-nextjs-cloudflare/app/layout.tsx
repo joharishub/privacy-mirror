@@ -1,8 +1,4 @@
-export const metadata = {
-  title: 'Privacy Mirror',
-  description: 'See what a website can learn about you the moment you land on it.',
-};
-
+export const metadata = { title: 'Privacy Mirror', description: 'See what a website can learn about you the moment you land on it.' };
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
