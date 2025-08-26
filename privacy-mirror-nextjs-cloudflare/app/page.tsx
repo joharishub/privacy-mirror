@@ -1,294 +1,434 @@
-'use client'
-import React, { useEffect, useMemo, useState } from 'react'
+'use client';
 
-type WhoAmI = {
-  ip: string | null
-  city?: string | null
-  region?: string | null
-  country?: string | null
-  asn?: string | null
-  org?: string | null
-  method: 'headers' | 'cf-object' | 'lookup' | 'unknown'
-  serverCookieNames?: string[]
-  serverCookieCount?: number
+import React, { useEffect, useMemo, useState } from 'react';
+
+export const dynamic = 'force-dynamic'; // don’t prerender
+export const revalidate = 0;            // no static caching
+
+type ServerPayload = {
+  ip?: string;
+  city?: string | null;
+  region?: string | null;
+  country?: string | null;
+  asn?: string | null;
+  org?: string | null;
+  method?: 'headers' | 'cf-object' | null;
+  serverCookieNames?: string[];
+  serverCookieCount?: number;
+};
+
+type WhoAmIResponse = ServerPayload & {
+  error?: string;
+};
+
+type ClientPayload = {
+  timestamp: string;
+  url: string;
+  timezone: string | null;
+  locale: string | null;
+  languages: string[];
+  userAgent: string;
+  platform: string | null;
+  deviceMemory?: number | null;
+  hardwareConcurrency?: number | null;
+  screen?: { w: number; h: number } | null;
+  cookiesEnabled: boolean;
+  cookieNames: string[];
+  cookieCount: number;
+  webrtc: boolean;
+  referrer: string | null;
+  permissions: Record<string, 'granted' | 'denied' | 'prompt' | 'unknown'>;
+  webgl: {
+    vendor?: string;
+    renderer?: string;
+    canvasHash?: string;
+  };
+  network?: {
+    downlink?: number;
+    effectiveType?: string;
+    rtt?: number;
+  };
+};
+
+const section: React.CSSProperties = {
+  border: '1px solid #e5e7eb',
+  borderRadius: 12,
+  padding: 16,
+  background: 'white',
+};
+
+const grid: React.CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
+  gap: 16,
+};
+
+const mono: React.CSSProperties = {
+  fontFamily:
+    'ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace',
+  whiteSpace: 'pre-wrap',
+  wordBreak: 'break-word',
+  fontSize: 12.5,
+  lineHeight: 1.45,
+};
+
+function safeGetCookieNames(): string[] {
+  if (typeof document === 'undefined') return [];
+  const raw = document.cookie || '';
+  if (!raw.trim()) return [];
+  return raw
+    .split(';')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((pair) => pair.split('=')[0])
+    .filter(Boolean);
 }
 
-const pretty = (v: any) => JSON.stringify(v, null, 2)
-
-const maskIP = (ip?: string | null) => {
-  if (!ip) return ip
-  const parts = ip.split('.')
-  if (parts.length === 4) return `${parts[0]}.${parts[1]}.xxx.xxx`
-  return ip.replace(/:[0-9a-f]{1,4}$/i, ':xxxx')
-}
-
-function hashString(s: string) {
-  let h = 5381
-  for (let i = 0; i < s.length; i++) h = ((h << 5) + h) + s.charCodeAt(i)
-  return (h >>> 0).toString(36)
-}
-
-async function getBatteryInfo() {
+async function queryPermission(name: PermissionName): Promise<'granted' | 'denied' | 'prompt' | 'unknown'> {
   try {
+    // Safari doesn’t fully support navigator.permissions
     // @ts-ignore
-    if (navigator.getBattery) {
-      const b = await (navigator as any).getBattery()
-      return { charging: b.charging, level: b.level }
+    if (!navigator.permissions?.query) return 'unknown';
+    // @ts-ignore
+    const status = await navigator.permissions.query({ name });
+    // Some browsers return 'prompt', others undefined → coerce
+    return (status?.state as any) ?? 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+function getWebGLInfo(): { vendor?: string; renderer?: string; canvasHash?: string } {
+  try {
+    const canvas = document.createElement('canvas');
+    const gl =
+      canvas.getContext('webgl') ||
+      // @ts-ignore
+      canvas.getContext('experimental-webgl');
+    if (!gl) return {};
+    // @ts-ignore
+    const dbgInfo = gl.getExtension('WEBGL_debug_renderer_info');
+    // @ts-ignore
+    const vendor = dbgInfo && gl.getParameter(dbgInfo.UNMASKED_VENDOR_WEBGL);
+    // @ts-ignore
+    const renderer = dbgInfo && gl.getParameter(dbgInfo.UNMASKED_RENDERER_WEBGL);
+
+    // quick canvas hash
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.textBaseline = 'top';
+      ctx.font = "14px 'Arial'";
+      ctx.fillStyle = '#f60';
+      ctx.fillRect(0, 0, 100, 20);
+      ctx.fillStyle = '#069';
+      ctx.fillText(navigator.userAgent, 2, 2);
     }
-  } catch {}
-  return null
+    const canvasHash = canvas.toDataURL().slice(-12); // short, non-sensitive display
+    return { vendor, renderer, canvasHash };
+  } catch {
+    return {};
+  }
 }
-function getWebGLInfo() {
+
+function pretty(obj: any) {
   try {
-    const canvas = document.createElement('canvas')
-    const gl: any = canvas.getContext('webgl') || canvas.getContext('experimental-webgl')
-    if (!gl) return null
-    const dbg = gl.getExtension('WEBGL_debug_renderer_info')
-    const vendor = dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR)
-    const renderer = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)
-    return { vendor, renderer }
-  } catch { return null }
-}
-async function getPermissions() {
-  const names: any[] = ['geolocation','notifications','camera','microphone','clipboard-read','clipboard-write','persistent-storage']
-  const out: Record<string,string> = {}
-  await Promise.all(names.map(async n => {
-    try { const st = await (navigator as any).permissions.query({ name: n }); out[n] = st.state }
-    catch { out[n] = 'unknown' }
-  }))
-  return out
-}
-async function detectWebRTCIPs(timeoutMs = 1500): Promise<string[]> {
-  const RTCPeer: any = (window as any).RTCPeerConnection || (window as any).webkitRTCPeerConnection
-  if (!RTCPeer) return []
-  const pc = new RTCPeer({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] })
-  const vals: string[] = []
-  pc.createDataChannel('x')
-  pc.onicecandidate = (e: any) => { if (e?.candidate?.candidate) vals.push(e.candidate.candidate) }
-  const offer = await pc.createOffer(); await pc.setLocalDescription(offer)
-  await new Promise(r => setTimeout(r, timeoutMs)); pc.close()
-  const ips = new Set<string>()
-  vals.forEach(c => { const m = c.match(/candidate:[^ ]+ [^ ]+ [^ ]+ [^ ]+ ([^ ]+) /); if (m?.[1]) ips.add(m[1]) })
-  return Array.from(ips)
-}
-function parseDocumentCookies() {
-  const raw = document.cookie || ''
-  if (!raw) return { count: 0, cookies: [] as { name: string; valuePreview: string }[] }
-  const cookies = raw.split(';').map(s => s.trim()).filter(Boolean).map(pair => {
-    const [name, ...rest] = pair.split('=')
-    const value = rest.join('=') || ''
-    const preview = value.length > 12 ? value.slice(0, 12) + '…' : value
-    return { name, valuePreview: preview }
-  })
-  return { count: cookies.length, cookies }
-}
-function readStorage(kind: 'local' | 'session') {
-  try {
-    const s = kind === 'local' ? window.localStorage : window.sessionStorage
-    const keys = Object.keys(s)
-    const items = keys.map(k => {
-      const v = s.getItem(k) ?? ''
-      const bytes = new Blob([v]).size
-      const preview = v.length > 40 ? v.slice(0, 40) + '…' : v
-      return { key: k, bytes, preview }
-    })
-    const totalBytes = items.reduce((n, it) => n + it.bytes, 0)
-    return { count: keys.length, totalBytes, items }
-  } catch { return { count: 0, totalBytes: 0, items: [] as any[] } }
+    return JSON.stringify(obj, null, 2);
+  } catch {
+    return String(obj);
+  }
 }
 
 export default function Page() {
-  const [serverWho, setServerWho] = useState<WhoAmI | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [data, setData] = useState<any>({})
-  const [scary, setScary] = useState<boolean>(() => {
-    const qp = new URLSearchParams(window.location.search)
-    return !qp.has('safe') // default ON; add ?safe to calm it down
-  })
+  const [server, setServer] = useState<ServerPayload | null>(null);
+  const [client, setClient] = useState<ClientPayload | null>(null);
+  const [scary, setScary] = useState(true); // default ON per your request
+  const [copyOk, setCopyOk] = useState<'idle' | 'ok' | 'fail'>('idle');
 
-  const collect = async () => {
-    setLoading(true)
-    try {
-      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
-      const lang = navigator.language
-      const langs = navigator.languages
-      const ua = navigator.userAgent
-      const uaData = (navigator as any).userAgentData?.toJSON?.() || null
-      const memory = (navigator as any).deviceMemory ?? null
-      const cores = navigator.hardwareConcurrency ?? null
-      const cookies = navigator.cookieEnabled
-      const dnt = (navigator as any).doNotTrack || (window as any).doNotTrack || (navigator as any).msDoNotTrack || null
-      const vendor = navigator.vendor
-      const platform = navigator.platform
-      const webdriver = (navigator as any).webdriver ?? false
-      const screenInfo = {
-        width: screen.width, height: screen.height,
-        availWidth: screen.availWidth, availHeight: screen.availHeight,
-        colorDepth: screen.colorDepth, pixelRatio: devicePixelRatio
-      }
-      const connection: any = (navigator as any).connection
-        ? { effectiveType: (navigator as any).connection.effectiveType, downlink: (navigator as any).connection.downlink,
-            rtt: (navigator as any).connection.rtt, saveData: (navigator as any).connection.saveData }
-        : null
-      const battery = await getBatteryInfo()
-      const webgl = getWebGLInfo()
-      const permissions = await getPermissions()
-      const referrer = document.referrer || null
-      const url = new URL(window.location.href)
-      const params: Record<string,string> = {}; url.searchParams.forEach((v,k)=>params[k]=v)
-      const mediaDevices = await (navigator.mediaDevices?.enumerateDevices?.() || Promise.resolve([])) as any[]
-      const deviceCounts = Array.isArray(mediaDevices)
-        ? mediaDevices.reduce((acc: any, d: any) => { acc[d.kind] = (acc[d.kind] || 0) + 1; return acc }, {})
-        : {}
-      const canvas = document.createElement('canvas')
-      const ctx = canvas.getContext('2d'); let canvasHash: string | null = null
-      if (ctx) { ctx.textBaseline='top'; ctx.font="14px 'Arial'"; ctx.fillText(ua+JSON.stringify(screenInfo),2,2); canvasHash = hashString(canvas.toDataURL()) }
-      const rtcIPs = await detectWebRTCIPs()
-      const docCookies = parseDocumentCookies()
-      const local = readStorage('local')
-      const session = readStorage('session')
-      setData({
-        timestamp: new Date().toISOString(), url: url.href, referrer, utmParams: Object.keys(params).length? params : null,
-        timezone: tz, locale: lang, languages: langs, userAgent: ua, userAgentData: uaData, vendor, platform, webdriver, doNotTrack: dnt,
-        cookiesEnabled: cookies, memoryGB: memory, cpuCores: cores, screen: screenInfo, connection, battery, webgl,
-        mediaDeviceCounts: deviceCounts, permissions, canvasFingerprint: canvasHash, webRTCIPs: rtcIPs,
-        cookiesClient: docCookies, storageLocal: local, storageSession: session
-      })
-      // Dramatic reveal: scroll to first section
-      setTimeout(() => { document.querySelector('h3')?.scrollIntoView({ behavior: 'smooth' }) }, 300)
-    } finally { setLoading(false) }
-  }
-
-  const copyJSON = async () => {
-    try { await navigator.clipboard.writeText(pretty({ server: serverWho, client: data })); alert('Results copied to clipboard ✅') }
-    catch { alert('Copy failed — your browser may block clipboard without HTTPS/user gesture') }
-  }
-
+  // 1) Fetch server-side facts (IP/geo/ASN + server cookies)
   useEffect(() => {
-    collect()
-    fetch('/api/whoami').then(r => r.json()).then(setServerWho).catch(()=>setServerWho(null))
-  }, [])
+    let mounted = true;
+    (async () => {
+      try {
+        const res = await fetch('/api/whoami', { cache: 'no-store' });
+        const data: WhoAmIResponse = await res.json();
+        if (!mounted) return;
+        setServer(data);
+      } catch (e) {
+        if (!mounted) return;
+        setServer({ method: null });
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
-  const maskedServer = useMemo(() => {
-    if (!serverWho || !scary) return serverWho
-    return { ...serverWho, ip: maskIP(serverWho.ip || null) }
-  }, [serverWho, scary])
+  // 2) Gather client-side signals
+  useEffect(() => {
+    const hasWindow = typeof window !== 'undefined';
+
+    (async () => {
+      const permissions: ClientPayload['permissions'] = {
+        'clipboard-read': await queryPermission('clipboard-read' as PermissionName),
+        'clipboard-write': await queryPermission('clipboard-write' as PermissionName),
+        geolocation: await queryPermission('geolocation'),
+        notifications: await queryPermission('notifications'),
+        microphone: await queryPermission('microphone' as PermissionName),
+        camera: await queryPermission('camera' as PermissionName),
+        'persistent-storage': await queryPermission('persistent-storage' as PermissionName),
+      };
+
+      const cookieNames = safeGetCookieNames();
+      const nav = hasWindow ? navigator as any : undefined;
+      const mem = (nav?.deviceMemory ?? null) as number | null;
+      const cores = (nav?.hardwareConcurrency ?? null) as number | null;
+
+      const net = (() => {
+        const c = hasWindow ? (navigator as any).connection : undefined;
+        if (!c) return undefined;
+        return {
+          downlink: typeof c.downlink === 'number' ? c.downlink : undefined,
+          effectiveType: c.effectiveType || undefined,
+          rtt: typeof c.rtt === 'number' ? c.rtt : undefined,
+        };
+      })();
+
+      const webgl = hasWindow ? getWebGLInfo() : {};
+
+      const payload: ClientPayload = {
+        timestamp: new Date().toISOString(),
+        url: hasWindow ? window.location.href : '',
+        timezone: hasWindow ? Intl.DateTimeFormat().resolvedOptions().timeZone ?? null : null,
+        locale: hasWindow ? navigator.language ?? null : null,
+        languages: hasWindow ? (navigator.languages ?? []).slice(0, 8) : [],
+        userAgent: hasWindow ? navigator.userAgent : '',
+        platform: hasWindow ? (navigator as any).platform ?? null : null,
+        deviceMemory: mem,
+        hardwareConcurrency: cores,
+        screen: hasWindow ? { w: window.screen.width, h: window.screen.height } : null,
+        cookiesEnabled: hasWindow ? navigator.cookieEnabled : false,
+        cookieNames,
+        cookieCount: cookieNames.length,
+        webrtc: !!(hasWindow && (navigator as any).mediaDevices),
+        referrer: hasWindow ? (document.referrer || null) : null,
+        permissions,
+        webgl,
+        network: net,
+      };
+
+      setClient(payload);
+    })();
+  }, []);
 
   const maskedClient = useMemo(() => {
-    if (!scary) return data
-    const copy = { ...data }
-    if (copy.webRTCIPs?.length) copy.webRTCIPs = copy.webRTCIPs.map((x: string) => maskIP(x))
-    return copy
-  }, [data, scary])
+    if (!client) return null;
+    // return exactly what we measured on the client (no masking).
+    return client;
+  }, [client]);
 
-  const json = useMemo(() => pretty(maskedClient), [maskedClient])
+  const combined = useMemo(() => {
+    return {
+      server: server ?? {},
+      client: maskedClient ?? {},
+    };
+  }, [server, maskedClient]);
+
+  async function copyJson() {
+    try {
+      const text = pretty(combined);
+      // Safari secure-context requirement: this runs on https
+      await navigator.clipboard.writeText(text);
+      setCopyOk('ok');
+      setTimeout(() => setCopyOk('idle'), 1500);
+    } catch {
+      // fallback
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = pretty(combined);
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        setCopyOk('ok');
+        setTimeout(() => setCopyOk('idle'), 1500);
+      } catch {
+        setCopyOk('fail');
+        setTimeout(() => setCopyOk('idle'), 2000);
+      }
+    }
+  }
 
   return (
-    <div>
+    <div style={{ maxWidth: 1100, margin: '24px auto', padding: '0 16px' }}>
       <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <div>
           <h1 style={{ fontSize: 28, margin: 0 }}>🔎 Privacy Mirror</h1>
-          <p style={{ margin: '6px 0', color: '#334155' }}>Everything a site can learn from your browser — plus server-side IP/ASN via headers.</p>
+          <p style={{ color: '#6b7280', margin: '4px 0 0' }}>
+            Everything a site can learn from your browser — plus server-side IP/ASN/geo via headers.
+          </p>
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={scary}
+              onChange={(e) => setScary(e.target.checked)}
+            />
+            <span>😈 Scary mode</span>
+          </label>
           <button
-            onClick={() => setScary(s => !s)}
-            style={{ padding: '8px 12px', borderRadius: 10, border: '1px solid #cbd5e1', background: scary ? '#fee2e2' : 'white', cursor: 'pointer' }}>
-            {scary ? 'Scary mode: ON' : 'Scary mode: OFF'}
-          </button>
-          <button
-            onClick={copyJSON}
-            style={{ padding: '8px 12px', borderRadius: 10, border: '1px solid #cbd5e1', background: 'white', cursor: 'pointer' }}>
-            Copy results
-          </button>
-          <button
-            onClick={collect}
-            disabled={loading}
-            style={{ padding: '8px 12px', borderRadius: 10, border: '1px solid #cbd5e1', background: 'white', cursor: 'pointer' }}>
-            {loading ? 'Scanning…' : 'Run checks'}
+            onClick={copyJson}
+            style={{
+              border: '1px solid #d1d5db',
+              padding: '8px 12px',
+              borderRadius: 8,
+              background: 'white',
+              cursor: 'pointer',
+            }}
+            title="Copy all data as JSON"
+          >
+            {copyOk === 'ok' ? '✓ Copied' : copyOk === 'fail' ? '✗ Failed' : 'Copy JSON'}
           </button>
         </div>
       </header>
 
-      {scary && (
-        <div style={{ background: '#fee2e2', border: '1px solid #fca5a5', borderRadius: 12, padding: 10, marginBottom: 12 }}>
-          <strong>Scary mode:</strong> This was captured instantly — no pop-ups, no consent. (IP masked on-screen; server still sees full address.)
+      {/* GRID */}
+      <div style={grid}>
+        <div style={section}>
+          <b>Server View (IP &amp; Geo)</b>
+          <pre style={mono}>{pretty(server ?? {})}</pre>
         </div>
-      )}
 
-      <section style={{ display: 'grid', gap: 12, gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))' }}>
-        <div style={{ background: 'white', border: '1px solid #e2e8f0', borderRadius: 12, padding: 12 }}>
-          <h3>Server View (IP & Geo)</h3>
-          <pre style={{ fontSize: 12, overflow: 'auto' }}>{pretty(maskedServer)}</pre>
-          {serverWho?.serverCookieCount !== undefined && (
-            <div style={{ fontSize: 12, marginTop: 6 }}>
-              Server saw {serverWho.serverCookieCount} cookie{serverWho.serverCookieCount === 1 ? '' : 's'}: {serverWho.serverCookieNames?.slice(0,6).join(', ')}
-              {serverWho.serverCookieNames && serverWho.serverCookieNames.length > 6 ? ' …' : ''}
+        <div style={section}>
+          <b>Locale &amp; Time</b>
+          <pre style={mono}>
+{pretty({
+  timezone: client?.timezone ?? null,
+  locale: client?.locale ?? null,
+  languages: client?.languages ?? [],
+  timestamp: client?.timestamp ?? null,
+})}
+          </pre>
+        </div>
+
+        <div style={section}>
+          <b>Device &amp; OS</b>
+          <pre style={mono}>
+{pretty({
+  platform: client?.platform ?? null,
+  ua: client?.userAgent ?? '',
+  CPU_cores: client?.hardwareConcurrency ?? null,
+  RAM_gb_estimate: client?.deviceMemory ?? null,
+  screen: client?.screen ?? null,
+})}
+          </pre>
+        </div>
+
+        <div style={section}>
+          <b>Graphics / WebGL</b>
+          <pre style={mono}>
+{pretty({
+  vendor: client?.webgl.vendor ?? undefined,
+  renderer: client?.webgl.renderer ?? undefined,
+  canvasHash: client?.webgl.canvasHash ?? undefined,
+})}
+          </pre>
+        </div>
+
+        <div style={section}>
+          <b>Network</b>
+          <pre style={mono}>
+{pretty({
+  referrer: client?.referrer ?? null,
+  webrtcAvailable: client?.webrtc ?? false,
+  connection: client?.network ?? undefined,
+})}
+          </pre>
+        </div>
+
+        <div style={section}>
+          <b>Privacy Flags</b>
+          <pre style={mono}>
+{pretty({
+  cookiesEnabled: client?.cookiesEnabled ?? false,
+  doNotTrack: (typeof navigator !== 'undefined' && (navigator as any).doNotTrack) || null,
+  permissions: client?.permissions ?? {},
+})}
+          </pre>
+        </div>
+
+        <div style={section}>
+          <b>Cookies (client-side)</b>
+          <pre style={mono}>
+{pretty({
+  count: client?.cookieCount ?? 0,
+  names: client?.cookieNames ?? [],
+})}
+          </pre>
+          {scary && (
+            <div style={{ color: '#b91c1c', marginTop: 8 }}>
+              ⚠ If any of these belong to analytics/ads, this visit can be linked to activity on other sites.
             </div>
           )}
         </div>
 
-        <div style={{ background: 'white', border: '1px solid #e2e8f0', borderRadius: 12, padding: 12 }}>
-          <h3>Locale & Time</h3>
-          <div>Timezone: {maskedClient.timezone || '-'}</div>
-          <div>Locale: {maskedClient.locale || '-'}</div>
-          <div>Languages: {Array.isArray(maskedClient.languages) ? maskedClient.languages.join(', ') : '-'}</div>
-          <div>Timestamp: {maskedClient.timestamp}</div>
+        <div style={section}>
+          <b>Server cookies seen</b>
+          <pre style={mono}>
+{pretty({
+  count: server?.serverCookieCount ?? 0,
+  names: server?.serverCookieNames ?? [],
+})}
+          </pre>
+          <div style={{ color: '#6b7280' }}>
+            (Server can only see cookies scoped to this domain/path; third-party cookies may be blocked.)
+          </div>
         </div>
+      </div>
 
-        <div style={{ background: 'white', border: '1px solid #e2e8f0', borderRadius: 12, padding: 12 }}>
-          <h3>Device & OS</h3>
-          <div>Platform: {maskedClient.platform || '-'}</div>
-          <div>Vendor: {maskedClient.vendor || '-'}</div>
-          <div>UA: {maskedClient.userAgent || '-'}</div>
-          <div>CPU Cores: {maskedClient.cpuCores ?? '-'}</div>
-          <div>RAM (approx): {maskedClient.memoryGB ? `${maskedClient.memoryGB} GB` : '-'}</div>
+      {/* SCARY CALLOUTS */}
+      {scary && (
+        <div style={{ ...section, marginTop: 16, borderColor: '#fecaca', background: '#fff7ed' }}>
+          <b>😈 Scary Mode — what could be inferred</b>
+          <ul style={{ margin: '8px 0 0 18px' }}>
+            <li>Your IP ({server?.ip ?? 'unknown'}) reveals country/region and ASN ({server?.asn ?? 'unknown'}).</li>
+            <li>
+              Combining User-Agent, languages, time zone, screen size, and WebGL renderer (
+              {client?.webgl.renderer ?? 'unknown'}) makes your browser more unique.
+            </li>
+            <li>
+              Cookies ({client?.cookieCount ?? 0}) can re-identify returning visits even if your IP changes.
+            </li>
+          </ul>
         </div>
+      )}
 
-        <div style={{ background: 'white', border: '1px solid #e2e8f0', borderRadius: 12, padding: 12 }}>
-          <h3>Graphics / WebGL</h3>
-          <div>Vendor: {maskedClient?.webgl?.vendor || '-'}</div>
-          <div>Renderer: {maskedClient?.webgl?.renderer || '-'}</div>
-          <div>Canvas hash: {maskedClient.canvasFingerprint || '-'}</div>
+      {/* RAW JSON */}
+      <div style={{ ...section, marginTop: 16 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <b>Raw JSON</b>
+          <button
+            onClick={copyJson}
+            style={{
+              border: '1px solid #d1d5db',
+              padding: '6px 10px',
+              borderRadius: 8,
+              background: 'white',
+              cursor: 'pointer',
+            }}
+            title="Copy all data as JSON"
+          >
+            {copyOk === 'ok' ? '✓ Copied' : copyOk === 'fail' ? '✗ Failed' : 'Copy JSON'}
+          </button>
         </div>
+        <pre style={{ ...mono, marginTop: 8 }}>{pretty(combined)}</pre>
+      </div>
 
-        <div style={{ background: 'white', border: '1px solid #e2e8f0', borderRadius: 12, padding: 12 }}>
-          <h3>Network</h3>
-          <div>Referrer: {maskedClient.referrer || '(none)'} </div>
-          <div>UTM: {maskedClient.utmParams ? pretty(maskedClient.utmParams) : '(none)'}</div>
-          <div>WebRTC possible IPs: {maskedClient.webRTCIPs?.length ? maskedClient.webRTCIPs.join(', ') : '-'}</div>
-        </div>
-
-        <div style={{ background: 'white', border: '1px solid #e2e8f0', borderRadius: 12, padding: 12 }}>
-          <h3>Cookies & Storage</h3>
-          <div><strong>Client-visible cookies:</strong> {maskedClient.cookiesClient?.count ?? 0}</div>
-          {maskedClient.cookiesClient?.cookies?.length ? (
-            <ul style={{ fontSize: 12 }}>
-              {maskedClient.cookiesClient.cookies.map((c: any) => (
-                <li key={c.name}><code>{c.name}</code> = <code>{c.valuePreview}</code></li>
-              ))}
-            </ul>
-          ) : <div style={{ fontSize: 12, color: '#64748b' }}>(No non-HttpOnly cookies readable by JS yet)</div>}
-          <div style={{ marginTop: 8 }}><strong>LocalStorage:</strong> {maskedClient.storageLocal?.count ?? 0} keys ({maskedClient.storageLocal?.totalBytes ?? 0} bytes)</div>
-          <div style={{ marginTop: 4 }}><strong>SessionStorage:</strong> {maskedClient.storageSession?.count ?? 0} keys ({maskedClient.storageSession?.totalBytes ?? 0} bytes)</div>
-        </div>
-
-        <div style={{ background: 'white', border: '1px solid #e2e8f0', borderRadius: 12, padding: 12 }}>
-          <h3>Privacy Flags</h3>
-          <div>Cookies Enabled: {String(maskedClient.cookiesEnabled)}</div>
-          <div>Do Not Track: {String(maskedClient.doNotTrack)}</div>
-          <div>Permissions: <pre style={{ fontSize: 12 }}>{maskedClient.permissions ? pretty(maskedClient.permissions) : '-'}</pre></div>
-        </div>
-      </section>
-
-      <section style={{ marginTop: 16 }}>
-        <h3>Raw JSON</h3>
-        <pre style={{ fontSize: 12, background: 'white', border: '1px solid #e2e8f0', borderRadius: 12, padding: 12, overflow: 'auto' }}>{json}</pre>
-      </section>
-
-      <footer style={{ marginTop: 16, fontSize: 12, color: '#64748b' }}>
-        Built for demos. No data is stored server-side unless you change the code. • Build 0.2.0
+      <footer style={{ color: '#6b7280', fontSize: 12, marginTop: 16, textAlign: 'center' }}>
+        Built for education. Nothing here is legal or security advice.
       </footer>
     </div>
-  )
+  );
 }
