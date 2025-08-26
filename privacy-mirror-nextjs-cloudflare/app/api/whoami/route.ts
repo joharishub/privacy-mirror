@@ -25,8 +25,13 @@ export async function GET(req: NextRequest) {
     }
     const res = NextResponse.json(payload)
     // demo cookie so client can read at least one
-    res.cookies.set('pm_demo', '1', { path: '/', sameSite: 'Lax', secure: true, maxAge: 60 * 60 * 24 * 365, httpOnly: false })
-    return res
+res.cookies.set('pm_demo', '1', {
+  path: '/',
+  sameSite: 'lax',   // 👈 lowercase
+  secure: true,
+  maxAge: 60 * 60 * 24 * 365,
+  httpOnly: false,
+})    return res
   } catch (e: any) {
     return NextResponse.json({ error: String(e) }, { status: 500 })
   }
