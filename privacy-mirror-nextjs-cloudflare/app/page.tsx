@@ -1,9 +1,9 @@
 'use client';
 
-import React, { useEffect, useMemo, useState } from 'react';
-
-export const dynamic = 'force-dynamic'; // don’t prerender
-export const revalidate = 0;            // no static caching
+export const runtime = 'edge';                // run on the edge
+export const dynamic = 'force-dynamic';       // never prerender
+export const fetchCache = 'force-no-store';   // no fetch caching
+export const revalidate = false;              // explicitly not ISR
 
 type ServerPayload = {
   ip?: string;
